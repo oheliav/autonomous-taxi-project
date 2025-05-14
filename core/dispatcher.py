@@ -1,7 +1,7 @@
 # core/dispatcher.py
 
 from routing.route_gen import RouteGenerator
-from routing.graph_builer import CarlaGraph
+from routing.graph_builder import CarlaGraph
 from routing.extract_features import extract_features
 from routing.ai_router import ETAEstimator
 
