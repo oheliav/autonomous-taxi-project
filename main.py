@@ -7,10 +7,11 @@ from carla_interface.taxi_agent import TaxiAgent
 from core.fleet_manager import FleetManager
 
 def main():
+    #connect to client
     client = carla.Client("localhost", 2000)
     client.set_timeout(10.0)
 
-    client.load_world("Town01")
+    #client.load_world("Town01")
     world = client.get_world()
     map_name = world.get_map().name
     print(f"🗌️ Current map: {map_name}")
@@ -29,14 +30,27 @@ def main():
         print("📝 Stopped by user.")
 
     # Spawn vehicle
+    spawn_points = world.get_map().get_spawn_points()
+    print(f"Found {len(spawn_points)} spawn points.")
+
     blueprint_library = world.get_blueprint_library()
     vehicle_bp = blueprint_library.filter("vehicle.tesla.model3")[0]
-    spawn_point = world.get_map().get_spawn_points()[0]
-    vehicle = world.try_spawn_actor(vehicle_bp, spawn_point)
+    vehicle = None
+    for sp in spawn_points:
+        vehicle = world.try_spawn_actor(vehicle_bp, sp)
+        if vehicle:
+            print(f"✅ Spawned vehicle at {sp.location}")
+            break
 
-    if vehicle is None:
-        print("❌ Failed to spawn vehicle.")
-        return
+    if not vehicle:
+        print("❌ Still failed to spawn vehicle after trying all points.")
+
+    spectator = world.get_spectator()
+    transform = vehicle.get_transform()
+    spectator.set_transform(carla.Transform(
+        transform.location + carla.Location(z=50),
+        carla.Rotation(pitch=-45)
+    ))
 
     # Init agent and traffic manager
     traffic_manager = client.get_trafficmanager()
@@ -47,13 +61,56 @@ def main():
 
     # Define route
     start_loc = vehicle.get_location()
-    end_loc = carla.Location(x=80, y=20, z=0)
+    end_loc = carla.Location(x=981, y=592, z=0)
 
     start_node = graph.get_closest_node(start_loc)
     end_node = graph.get_closest_node(end_loc)
 
     route_gen = RouteGenerator(graph)
     route = route_gen.find_shortest_route(start_loc, end_loc, world=world, draw=True)
+
+    world.debug.draw_string(
+    vehicle.get_location() + carla.Location(z=2),
+    '🚗 VEHICLE',
+    draw_shadow=False,
+    color=carla.Color(255, 255, 0),  # Yellow
+    life_time=1000.0,
+    persistent_lines=True
+)
+
+    # Start
+    world.debug.draw_string(
+        start_loc + carla.Location(z=2),
+        'START',
+        draw_shadow=False,
+        color=carla.Color(255, 0, 0),  # Red
+        life_time=1000.0,
+        persistent_lines=True
+    )
+
+    # End
+    world.debug.draw_string(
+        end_loc + carla.Location(z=2),
+        'END',
+        draw_shadow=False,
+        color=carla.Color(0, 0, 255),  # Blue
+        life_time=1000.0,
+        persistent_lines=True
+    )
+    
+    waypoints = [graph.get_waypoint(n) for n in route]
+
+    for i in range(len(waypoints) - 1):
+        wp1 = waypoints[i]
+        wp2 = waypoints[i + 1]
+        if wp1 and wp2:
+            world.debug.draw_line(
+                wp1.transform.location + carla.Location(z=0.5),
+                wp2.transform.location + carla.Location(z=0.5),
+                thickness=0.2,
+                color=carla.Color(0, 255, 0),  # Green
+                life_time=60.0
+            )
 
     if route:
         print(f"✅ Found route with {len(route)} nodes")

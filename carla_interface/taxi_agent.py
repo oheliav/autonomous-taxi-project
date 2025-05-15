@@ -13,28 +13,7 @@ class TaxiAgent:
         # TM settings
         self.tm.set_synchronous_mode(True)
         self.tm.set_global_distance_to_leading_vehicle(2.5)
-        self.tm.set_percentage_speed_difference(vehicle, 0)
 
-    def drive_route(self, waypoints):
-        """
-        Drives a full list of waypoints using Traffic Manager and returns total time.
-        """
-        if not waypoints:
-            return 0.0
-
-        start_time = time.time()
-
-        transforms = [wp.transform for wp in waypoints]
-        destination = transforms[-1].location
-
-        self.vehicle.set_autopilot(True, self.tm.get_port())
-        self.tm.set_path(self.vehicle, transforms)
-
-        while not self._reached(destination):
-            self.world.tick()
-
-        self.vehicle.set_autopilot(False)
-        return round(time.time() - start_time, 2)
 
     def drive_and_log_segments(self, waypoints, driving_graph):
         """
@@ -80,9 +59,43 @@ class TaxiAgent:
         self.vehicle.set_autopilot(False)
         return round(total_time, 2)
 
+
+    def drive_route(self, waypoints):
+        if not waypoints:
+            return 0.0
+
+        start_time = time.time()
+        self.vehicle.set_autopilot(True, self.tm.get_port())
+
+        for i in range(len(waypoints) - 1):
+            current_wp = waypoints[i]
+            next_wp = waypoints[i + 1]
+
+            # Detect lane change
+            if next_wp.lane_id != current_wp.lane_id:
+                direction = next_wp.lane_id > current_wp.lane_id  # True = left, False = right
+                print(f"↔️ Forcing lane change {'left' if direction else 'right'}")
+                self.tm.force_lane_change(self.vehicle, direction)
+
+            # Wait until close to the next waypoint
+            while self._wp_distance(next_wp) > 2.0:
+                self.world.tick()
+
+        self.vehicle.set_autopilot(False)
+        return round(time.time() - start_time, 2)
+
+    def _wp_distance(self, wp):
+        return self.vehicle.get_location().distance(wp.transform.location)
+    
     def _reached(self, destination, threshold=3.0):
-        current = self.vehicle.get_location()
-        return current.distance(destination) < threshold
+        vehicle_wp = self.map.get_waypoint(self.vehicle.get_location(), project_to_road=True)
+        dest_wp = self.map.get_waypoint(destination, project_to_road=True)
+
+        if not vehicle_wp or not dest_wp:
+            return False
+
+        dist = vehicle_wp.transform.location.distance(dest_wp.transform.location)
+        return dist < threshold
 
     def _id(self, wp):
         loc = wp.transform.location

@@ -58,7 +58,7 @@ class RouteGenerator:
                 if wp:
                     world.debug.draw_string(
                         wp.transform.location + carla.Location(z=0.3),
-                        'FF', draw_shadow=False,
+                        'C', draw_shadow=False,
                         color=carla.Color(255, 100, 100),
                         life_time=60.0
                     )
