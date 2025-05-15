@@ -1,114 +1,67 @@
-import carla # type: ignore
+import carla  # type: ignore
 import time
 
-from routing.graph_builder import CarlaGraph  # note the typo: your file is 'graph_builer.py'
+from routing.graph_builder import CarlaGraph  # note: your file is 'graph_builder.py'
 from routing.route_gen import RouteGenerator
+from carla_interface.taxi_agent import TaxiAgent
+from core.fleet_manager import FleetManager
 
 def main():
     client = carla.Client("localhost", 2000)
     client.set_timeout(10.0)
-    
-    client.load_world("Town01") 
+
+    client.load_world("Town01")
     world = client.get_world()
     map_name = world.get_map().name
-    print(f"🗺️ Current map: {map_name}")
-    
+    print(f"🗌️ Current map: {map_name}")
+
     print("🔄 Building waypoint graph...")
     graph = CarlaGraph(world, resolution=2.0)
     graph.build_graph()
-    #graph.print_graph_summary(limit=50)
-    #graph.print_edges(limit=100)
-
-
     print(f"✅ Graph built with {len(graph.get_all_nodes())} nodes. Visualizing...")
-
     graph.visualize(color=(0, 255, 0), life_time=120.0)
 
     print("👀 Waypoints drawn. Press Ctrl+C to quit or wait.")
     try:
-        while True:
+        for _ in range(5):
             time.sleep(1)
     except KeyboardInterrupt:
-        print("🛑 Stopped by user.")
-        
-    # Define start/end locations (can be off-road)
-    start_loc = carla.Location(x=10, y=10, z=0)
+        print("📝 Stopped by user.")
+
+    # Spawn vehicle
+    blueprint_library = world.get_blueprint_library()
+    vehicle_bp = blueprint_library.filter("vehicle.tesla.model3")[0]
+    spawn_point = world.get_map().get_spawn_points()[0]
+    vehicle = world.try_spawn_actor(vehicle_bp, spawn_point)
+
+    if vehicle is None:
+        print("❌ Failed to spawn vehicle.")
+        return
+
+    # Init agent and traffic manager
+    traffic_manager = client.get_trafficmanager()
+    agent = TaxiAgent(world, vehicle, traffic_manager)
+
+    # Optional: use FleetManager if scaling to multiple taxis
+    fleet = FleetManager([vehicle])
+
+    # Define route
+    start_loc = vehicle.get_location()
     end_loc = carla.Location(x=80, y=20, z=0)
 
-    # Get nearest graph node IDs
     start_node = graph.get_closest_node(start_loc)
     end_node = graph.get_closest_node(end_loc)
 
-    # Get their waypoint positions
-    start_wp = graph.get_waypoint(start_node)
-    end_wp = graph.get_waypoint(end_node)
-
-    # Visualize start location
-    world.debug.draw_string(start_loc + carla.Location(z=1),
-                            'X', draw_shadow=False,
-                            color=carla.Color(255, 0, 0), life_time=60.0, persistent_lines=True)
-
-    # Visualize closest node to start
-    if start_wp:
-        world.debug.draw_string(start_wp.transform.location + carla.Location(z=1),
-                                'o', draw_shadow=False,
-                                color=carla.Color(255, 0, 0), life_time=60.0, persistent_lines=True)
-
-    # Visualize end location
-    world.debug.draw_string(end_loc + carla.Location(z=1),
-                            'X', draw_shadow=False,
-                            color=carla.Color(0, 0, 255), life_time=60.0, persistent_lines=True)
-
-    # Visualize closest node to end
-    if end_wp:
-        world.debug.draw_string(end_wp.transform.location + carla.Location(z=1),
-                                'o', draw_shadow=False,
-                                color=carla.Color(0, 0, 255), life_time=60.0, persistent_lines=True)
-
-
     route_gen = RouteGenerator(graph)
-    print("📍 From:", start_loc)
-    print("📍 To:", end_loc)
-    start_id = graph.get_closest_node(start_loc)
-    end_id = graph.get_closest_node(end_loc)
-    route = route_gen.find_shortest_route(
-        start_loc, end_loc,
-        world=world,
-        draw=True,
-        draw_failed_path=True
-    )
-    print(f"Neighbors of start node: {graph.get_neighbors(start_id)}")
-    print(f"Neighbors of end node: {graph.get_neighbors(end_id)}")
+    route = route_gen.find_shortest_route(start_loc, end_loc, world=world, draw=True)
 
     if route:
         print(f"✅ Found route with {len(route)} nodes")
-        
+        waypoints = [graph.get_waypoint(n) for n in route]
+        total_time = agent.drive_route(waypoints)
+        print(f"🚕 Taxi finished route in {total_time:.2f} seconds")
     else:
         print("❌ No route found.")
-        
-    
-    routes = route_gen.generate_k_shortest_routes(start_loc, end_loc, k=3)
-
-    print(f"✅ Generated {len(routes)} route(s):")
-
-    for r_index, route in enumerate(routes):
-        print(f"🛣️ Route {r_index + 1}: {len(route)} nodes, distance={route_gen.compute_route_distance(route):.2f}")
-        
-        # Visualize each in a different color
-        color = [(255, 0, 0), (0, 0, 255), (0, 255, 0)][r_index % 3]
-        for i in range(len(route) - 1):
-            wp1 = graph.get_waypoint(route[i])
-            wp2 = graph.get_waypoint(route[i + 1])
-            if wp1 and wp2:
-                world.debug.draw_line(
-                    wp1.transform.location + carla.Location(z=0.5),
-                    wp2.transform.location + carla.Location(z=0.5),
-                    thickness=0.2,
-                    color=carla.Color(*color),
-                    life_time=60.0
-                )
-
-
 
 if __name__ == "__main__":
     main()
