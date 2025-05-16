@@ -1,102 +1,93 @@
-# carla_interface/taxi_agent.py
-
-import time
+# carla_interface/taxi_agent.py   (works on CARLA 0.9.10‑0.9.12)
+import math, time
 import carla
 
-class TaxiAgent:
-    def __init__(self, world, vehicle, traffic_manager):
-        self.world = world
-        self.vehicle = vehicle
-        self.map = world.get_map()
-        self.tm = traffic_manager
 
-        # TM settings
-        self.tm.set_synchronous_mode(True)
-        self.tm.set_global_distance_to_leading_vehicle(2.5)
+# ---------------------------------------------------------------------------
+# Local planner: very small pure‑pursuit controller
+# ---------------------------------------------------------------------------
 
+class PurePursuitFollower:
+    def __init__(self, vehicle, world, route, lookahead=6.0, target_kph=25):
+        self.vehicle    = vehicle
+        self.world      = world
+        self.route      = route[:]            # list[carla.Waypoint]
+        self.lookahead  = lookahead
+        self.target_v   = target_kph / 3.6    # m/s
 
-    def drive_and_log_segments(self, waypoints, driving_graph):
-        """
-        Drives the route segment by segment and logs delay into driving_graph.
-        """
-        if not waypoints:
-            return 0.0
+    def _next_waypoint(self):
+        if not self.route:
+            return None
+        loc = self.vehicle.get_transform().location
+        while self.route and loc.distance(self.route[0].transform.location) < self.lookahead:
+            self.route.pop(0)
+        return self.route[0] if self.route else None
 
-        total_time = 0.0
-
-        self.vehicle.set_autopilot(True, self.tm.get_port())
-
-        for i in range(len(waypoints) - 1):
-            wp1 = waypoints[i]
-            wp2 = waypoints[i + 1]
-            segment_path = [wp1.transform, wp2.transform]
-
-            id1 = self._id(wp1)
-            id2 = self._id(wp2)
-
-            self.tm.set_path(self.vehicle, segment_path)
-
-            start = time.time()
-            while True:
-                self.world.tick()
-                current = self.vehicle.get_location()
-                if current.distance(wp2.transform.location) < 1.5:
-                    break
-            end = time.time()
-
-            segment_time = round(end - start, 2)
-            total_time += segment_time
-
-            # update driving_graph
-            if id1 not in driving_graph:
-                driving_graph[id1] = {}
-            if id2 not in driving_graph[id1]:
-                driving_graph[id1][id2] = {"total_time": 0.0, "samples": 0}
-
-            driving_graph[id1][id2]["total_time"] += segment_time
-            driving_graph[id1][id2]["samples"] += 1
-
-        self.vehicle.set_autopilot(False)
-        return round(total_time, 2)
-
-
-    def drive_route(self, waypoints):
-        if not waypoints:
-            return 0.0
-
-        start_time = time.time()
-        self.vehicle.set_autopilot(True, self.tm.get_port())
-
-        for i in range(len(waypoints) - 1):
-            current_wp = waypoints[i]
-            next_wp = waypoints[i + 1]
-
-            # Detect lane change
-            if next_wp.lane_id != current_wp.lane_id:
-                direction = next_wp.lane_id > current_wp.lane_id  # True = left, False = right
-                print(f"↔️ Forcing lane change {'left' if direction else 'right'}")
-                self.tm.force_lane_change(self.vehicle, direction)
-
-            # Wait until close to the next waypoint
-            while self._wp_distance(next_wp) > 2.0:
-                self.world.tick()
-
-        self.vehicle.set_autopilot(False)
-        return round(time.time() - start_time, 2)
-
-    def _wp_distance(self, wp):
-        return self.vehicle.get_location().distance(wp.transform.location)
-    
-    def _reached(self, destination, threshold=3.0):
-        vehicle_wp = self.map.get_waypoint(self.vehicle.get_location(), project_to_road=True)
-        dest_wp = self.map.get_waypoint(destination, project_to_road=True)
-
-        if not vehicle_wp or not dest_wp:
+    def tick(self):
+        wp = self._next_waypoint()
+        if not wp:
             return False
 
-        dist = vehicle_wp.transform.location.distance(dest_wp.transform.location)
-        return dist < threshold
+        loc = self.vehicle.get_transform().location
+        dx, dy = wp.transform.location.x - loc.x, wp.transform.location.y - loc.y
 
-    def _id(self, wp):
-        loc = wp.transform.location
-        return (round(loc.x, 1), round(loc.y, 1))
+        yaw = math.radians(self.vehicle.get_transform().rotation.yaw)
+        x_v =  math.cos(yaw)*dx + math.sin(yaw)*dy
+        y_v = -math.sin(yaw)*dx + math.cos(yaw)*dy
+
+        steer = 2.0 * y_v / (self.lookahead ** 2)
+        steer = max(-1.0, min(1.0, steer))
+
+        vel = self.vehicle.get_velocity()
+        speed = math.hypot(vel.x, vel.y)
+        throttle = 0.6 if speed < self.target_v else 0.0
+
+        self.vehicle.apply_control(carla.VehicleControl(throttle=throttle,
+                                                        steer=steer))
+        return True
+
+
+# ---------------------------------------------------------------------------
+# TaxiAgent: optional TM for background cars, but ego is manual
+# ---------------------------------------------------------------------------
+
+class TaxiAgent:
+    """
+    • If you pass a TrafficManager (recommended) it will still run lights,
+      basic collision avoidance, etc., but *not* plan a global route.
+    • Ego path‑following is handled purely by PurePursuitFollower.
+    """
+    def __init__(self, vehicle: carla.Vehicle,
+                       world: carla.World,
+                       traffic_manager: carla.TrafficManager = None):
+        self.vehicle = vehicle
+        self.world   = world
+        self.tm      = traffic_manager    # can be None
+
+        # Keep ego under manual control; don't enable TM autopilot for it.
+        self.vehicle.set_autopilot(False)
+
+        # Tune background‑traffic behaviour if TM provided
+        if self.tm:
+            self.tm.global_percentage_speed_difference(-15)   # traffic ~15 % faster
+            # (add more TM tuning here if needed)
+
+        self.follower = None
+
+    # ----------------------------------------------------------------------
+
+    def drive_route(self, waypoints):
+        """
+        Blocks until vehicle reaches final waypoint. Returns elapsed seconds.
+        """
+        if len(waypoints) < 2:
+            return 0.0
+
+        self.follower = PurePursuitFollower(self.vehicle, self.world, waypoints)
+
+        t0 = self.world.get_snapshot().timestamp.elapsed_seconds
+        while self.world.wait_for_tick():
+            if not self.follower.tick():
+                break
+        t1 = self.world.get_snapshot().timestamp.elapsed_seconds
+        return round(t1 - t0, 2)

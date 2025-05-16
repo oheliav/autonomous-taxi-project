@@ -4,66 +4,115 @@ from routing.graph_builder import CarlaGraph
 import carla
 import heapq
 
+
+
+def _draw_debug(world, graph, visited, start_id, end_id,
+                path=None, reached=False,
+                life_time=30.0):
+    """Blue dots = visited.  Green = start.  Red = target.
+    Cyan line  = final path if reached."""
+    blue  = carla.Color(0,   0, 255)
+    green = carla.Color(0, 255,   0)
+    red   = carla.Color(255,  0,  0)
+    cyan  = carla.Color(0, 255, 255)
+
+    # visited nodes
+    for nid in visited:
+        wp = graph.get_waypoint(nid)
+        if wp:
+            world.debug.draw_string(wp.transform.location,
+                                    'R', draw_shadow=False,
+                                    color=blue, life_time=life_time)
+
+    # start / end labels
+    for nid, label, col in [(start_id, 'START', green),
+                            (end_id,   'END',   red)]:
+        wp = graph.get_waypoint(nid)
+        if wp:
+            world.debug.draw_string(wp.transform.location + carla.Location(z=0.5),
+                                    label, draw_shadow=False,
+                                    color=col, life_time=life_time)
+
+    # final path line (if found)
+    if reached and path and len(path) > 1:
+        for a, b in zip(path[:-1], path[1:]):
+            wpa = graph.get_waypoint(a).transform.location
+            wpb = graph.get_waypoint(b).transform.location
+            world.debug.draw_line(wpa + carla.Location(z=0.3),
+                                wpb + carla.Location(z=0.3),
+                                thickness=0.05,
+                                color=cyan,
+                                life_time=life_time)
+
+
 class RouteGenerator:
-    def __init__(self, graph: CarlaGraph):
+    def __init__(self, graph: CarlaGraph, world):
         self.graph = graph
+        self.world = world
     
     def _get_node_id_from_location(self, location):
         return self.graph.get_closest_node(location)
+    
+    # ---------------------------------------------------------------------------
+    # Pass draw=True (default) if RouteGenerator has a `world` attribute
+    # ---------------------------------------------------------------------------
 
-        
-    def find_shortest_route(self, start_loc, end_loc, world=None, draw=True, draw_failed_path=True):
-        start_id = self._get_node_id_from_location(start_loc)
-        end_id = self._get_node_id_from_location(end_loc)
+    def dijkstra(self, start_id, end_id, draw=True):
+        """Shortest‑path on CarlaGraph.  Draws visited nodes for debugging."""
+        graph    = self.graph
+        queue    = [(0, start_id)]
+        distances = {start_id: 0}
+        previous  = {}
+        visited   = set()
 
-        print(f"🧭 Start Node ID: {start_id}")
-        print(f"🏁 End Node ID: {end_id}")
+        # ---------- main loop ---------------------------------------------------
+        while queue:
+            current_dist, current_id = heapq.heappop(queue)
 
-        if start_id not in self.graph.graph:
-            print("❌ Start node not in graph.")
-            return None
-        if end_id not in self.graph.graph:
-            print("❌ End node not in graph.")
-            return None
-
-        visited = set()
-        min_heap = [(0.0, start_id, [])]
-
-        while min_heap:
-            cost, current, path = heapq.heappop(min_heap)
-
-            if current in visited:
+            if current_id in visited:
                 continue
-            visited.add(current)
+            visited.add(current_id)
 
-            new_path = path + [current]
+            if current_id == end_id:
+                print(f"✅  reached destination node {end_id}")
+                break
 
-            if current == end_id:
-                print(f"✅ Path found with cost {cost}")
+            for neighbor_id, weight in graph.get_neighbors(current_id):
+                new_dist = current_dist + weight
+                if neighbor_id not in distances or new_dist < distances[neighbor_id]:
+                    distances[neighbor_id] = new_dist
+                    previous[neighbor_id]  = current_id
+                    heapq.heappush(queue, (new_dist, neighbor_id))
 
-                if draw and world:
-                    self._draw_route(new_path, world, carla.Color(255, 0, 0))  # Red route
-                return new_path
+        # ---------- no path? ----------------------------------------------------
+        if end_id not in previous:
+            print(f"❌  no path — explored {len(visited):,} nodes")
+            if draw and hasattr(self, "world"):
+                _draw_debug(self.world, graph, visited, start_id, end_id,
+                            reached=False)
+            return []
 
-            for neighbor_id, distance in self.graph.get_neighbors(current):
-                if neighbor_id not in visited:
-                    heapq.heappush(min_heap, (cost + distance, neighbor_id, new_path))
+        # ---------- reconstruct -------------------------------------------------
+        path = []
+        cur  = end_id
+        while cur is not None:
+            path.insert(0, cur)
+            cur = previous.get(cur)
 
-        print("❌ Dijkstra failed: no path.")
+        print(f"✅  path found: {len(path):,} nodes  "
+            f"total distance {distances[end_id]:.1f} m  "
+            f"(explored {len(visited):,})")
 
-        if draw and draw_failed_path and world:
-            print(f"👀 Drawing visited nodes to visualize explored area ({len(visited)} nodes)...")
-            for node_id in visited:
-                wp = self.graph.get_waypoint(node_id)
-                if wp:
-                    world.debug.draw_string(
-                        wp.transform.location + carla.Location(z=0.3),
-                        'C', draw_shadow=False,
-                        color=carla.Color(255, 100, 100),
-                        life_time=60.0
-                    )
+        if draw and hasattr(self, "world"):
+            _draw_debug(self.world, graph, visited, start_id, end_id,
+                        path=path, reached=True)
 
-        return None
+        return path
+
+
+    # ---------------------------------------------------------------------------
+    # Helper: draw everything with CARLA’s debug API
+    # ---------------------------------------------------------------------------
 
                     
     def generate_k_shortest_routes(self, start_loc, end_loc, k=3):
@@ -168,3 +217,12 @@ class RouteGenerator:
                     total += dist
                     break
         return total
+
+# wrapper that lets you pass Locations directly
+    def dijkstra_locations(self, start_loc: carla.Location, end_loc: carla.Location):
+        s_id = self.graph.get_closest_node(start_loc)
+        e_id = self.graph.get_closest_node(end_loc)
+        if s_id is None or e_id is None:
+            print("⚠️  start or end not on any drivable waypoint")
+            return []
+        return self.dijkstra(s_id, e_id)

@@ -49,25 +49,33 @@ def main():
     transform = vehicle.get_transform()
     spectator.set_transform(carla.Transform(
         transform.location + carla.Location(z=50),
-        carla.Rotation(pitch=-45)
+        carla.Rotation(pitch=45)
     ))
 
     # Init agent and traffic manager
-    traffic_manager = client.get_trafficmanager()
-    agent = TaxiAgent(world, vehicle, traffic_manager)
+    # get TM from the client
+    tm = client.get_trafficmanager(8000)
 
-    # Optional: use FleetManager if scaling to multiple taxis
-    fleet = FleetManager([vehicle])
+    # create agent with (vehicle, world, traffic_manager)
+    agent = TaxiAgent(vehicle, world, tm)
+
 
     # Define route
     start_loc = vehicle.get_location()
-    end_loc = carla.Location(x=981, y=592, z=0)
+    end_loc = carla.Location(x=200, y=100, z=0)
 
     start_node = graph.get_closest_node(start_loc)
     end_node = graph.get_closest_node(end_loc)
 
-    route_gen = RouteGenerator(graph)
-    route = route_gen.find_shortest_route(start_loc, end_loc, world=world, draw=True)
+    route_gen = RouteGenerator(graph, world)
+
+    # ① get a route **by node IDs**
+    start_id = graph.get_closest_node(start_loc)
+    end_id   = graph.get_closest_node(end_loc)
+    route    = route_gen.dijkstra(start_id, end_id, draw=True)
+
+    # ② or (simpler) pass Locations directly
+    # route = route_gen.dijkstra_locations(start_loc, end_loc)
 
     world.debug.draw_string(
     vehicle.get_location() + carla.Location(z=2),
@@ -109,16 +117,15 @@ def main():
                 wp2.transform.location + carla.Location(z=0.5),
                 thickness=0.2,
                 color=carla.Color(0, 255, 0),  # Green
-                life_time=60.0
+                life_time=10000.0
             )
 
     if route:
-        print(f"✅ Found route with {len(route)} nodes")
         waypoints = [graph.get_waypoint(n) for n in route]
-        total_time = agent.drive_route(waypoints)
-        print(f"🚕 Taxi finished route in {total_time:.2f} seconds")
+        total = agent.drive_route(waypoints)
+        print(f"🚕  Taxi finished route in {total} s  ({len(route)} nodes)")
     else:
-        print("❌ No route found.")
+        print("❌  No route found.")
 
 if __name__ == "__main__":
     main()

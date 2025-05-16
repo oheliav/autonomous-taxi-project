@@ -1,64 +1,109 @@
+# routing/graph_builder.py  ⟵  completely rewritten
 from collections import defaultdict
-import carla  # type: ignore
+import carla
+import math
+from math import inf
+
 
 class CarlaGraph:
-    def __init__(self, world, resolution=2.0):
-        self.world = world
-        self.map = world.get_map()
-        self.graph = defaultdict(list)
-        self.node_lookup = {}
-        self.resolution = resolution
+    """
+    Dense waypoint‑level graph:
+      • node  = unique ID for every sampled waypoint
+      • edges = (successor, distance)   for
+          – each wp.next(resolution)           (forward, junctions, turns…)
+          – left/right lane with same heading  (lateral moves)
+      • bidirectional on the same lane so you can search both ways.
+    """
 
-    def _id(self, wp):
+    def __init__(self, world, resolution: float = 2.0) -> None:
+        self.world       = world
+        self.map         = world.get_map()
+        self.resolution  = resolution
+        self.graph       = defaultdict(list)   # node_id → List[(neigh_id, dist)]
+        self.node_lookup = {}                  # node_id → waypoint
+
+    # ---------- internal helpers ------------------------------------------------
+
+    @staticmethod
+    def _round(x: float, digits: int = 1) -> int:
+        """coarse‑quantise to avoid FP duplicates but keep ~10 cm precision"""
+        return int(round(x, digits) * 10**digits)
+
+    def _id(self, wp: carla.Waypoint):
         loc = wp.transform.location
-        return (int(loc.x * 10), int(loc.y * 10), wp.lane_id)
+        return (self._round(loc.x), self._round(loc.y), wp.road_id, wp.lane_id)
+
+    def _add_edge(self, from_id, to_id, dist: float, bidirectional: bool = False):
+        self.graph[from_id].append((to_id, dist))
+        if bidirectional:
+            self.graph[to_id].append((from_id, dist))
+
+    def _nearest_sample(self, wp):
+        best_id   = None
+        best_dist = inf
+        for cand_id, cand_wp in self.node_lookup.items():
+            if (cand_wp.road_id, cand_wp.lane_id) == (wp.road_id, wp.lane_id):
+                d = cand_wp.transform.location.distance(wp.transform.location)
+                if d < best_dist:
+                    best_dist, best_id = d, cand_id
+        return best_id if best_dist <= self.resolution else None
+    # ---------- public API ------------------------------------------------------
 
     def build_graph(self):
-        topology = self.map.get_topology()
-        print(f"🧩 Loaded {len(topology)} topology connections")
+        print("🔄   sampling map …")
+        wps = self.map.generate_waypoints(self.resolution)
+        print(f"🧩  {len(wps):,} waypoints sampled at {self.resolution} m")
 
-        skipped_lateral = 0
+        # 1) register every waypoint as a node
+        for wp in wps:
+            nid = self._id(wp)
+            self.node_lookup[nid] = wp
 
-        for entry_wp, exit_wp in topology:
-            from_id = self._id(entry_wp)
-            to_id = self._id(exit_wp)
+        # 2) add forward / junction edges
+        fwd_edges = 0
+        for wp in wps:
+            nid = self._id(wp)
+            for nxt in wp.next(self.resolution):
+                n_nid = self._id(nxt)
+                dist  = wp.transform.location.distance(nxt.transform.location)
+                self._add_edge(nid, n_nid, dist, bidirectional=True)
+                fwd_edges += 1
 
-            self.node_lookup[from_id] = entry_wp
-            self.node_lookup[to_id] = exit_wp
+        # 3) add lateral edges (same direction lanes only)
+        lat_edges = 0
+        for nid, wp in list(self.node_lookup.items()):
+            for side in (wp.get_left_lane(), wp.get_right_lane()):
+                if side                                 and \
+                   side.lane_type == carla.LaneType.Driving and \
+                   math.copysign(1, side.lane_id) == math.copysign(1, wp.lane_id):
+                    sid   = self._id(side)
+                    self.node_lookup[sid] = side
+                    dist = wp.transform.location.distance(side.transform.location)
+                    self._add_edge(nid, sid, dist, bidirectional=True)
+                    lat_edges += 1
+                    
+        topo_turns = self.map.get_topology()
+        jx_edges   = 0
+        for entry_wp, exit_wp in topo_turns:
+            # snap both ends to already‑sampled nodes if possible
+            nid_from = self._nearest_sample(entry_wp) or self._id(entry_wp)
+            nid_to   = self._nearest_sample(exit_wp)  or self._id(exit_wp)
+
+            self.node_lookup.setdefault(nid_from, entry_wp)
+            self.node_lookup.setdefault(nid_to,   exit_wp)
 
             dist = entry_wp.transform.location.distance(exit_wp.transform.location)
-            self.graph[from_id].append((to_id, dist))
+            self._add_edge(nid_from, nid_to, dist, bidirectional=False)
+            jx_edges += 1
 
-        # Now add lateral links for all unique waypoints in node_lookup
-        for wp_id, wp in self.node_lookup.items():
-            # Right lane connection
-            right_wp = wp.get_right_lane()
-            if right_wp and right_wp.lane_type == carla.LaneType.Driving and wp.lane_id * right_wp.lane_id > 0:
-                right_id = self._id(right_wp)
-                self.node_lookup[right_id] = right_wp
-                dist = wp.transform.location.distance(right_wp.transform.location)
-                self.graph[wp_id].append((right_id, dist))
-                self.graph[right_id].append((wp_id, dist))
-            else:
-                skipped_lateral += 1
+        print(f"↪️  junction‑turn edges: {jx_edges:,}")
 
-            # Left lane connection
-            left_wp = wp.get_left_lane()
-            if left_wp and left_wp.lane_type == carla.LaneType.Driving and wp.lane_id * left_wp.lane_id > 0:
-                left_id = self._id(left_wp)
-                self.node_lookup[left_id] = left_wp
-                dist = wp.transform.location.distance(left_wp.transform.location)
-                self.graph[wp_id].append((left_id, dist))
-                self.graph[left_id].append((wp_id, dist))
-            else:
-                skipped_lateral += 1
 
-        print(f"↔️ Skipped {skipped_lateral} lateral connections due to invalid lanes")
 
-        total_nodes = len(self.graph)
-        disconnected = [nid for nid, nbrs in self.graph.items() if len(nbrs) == 0]
-        print(f"🧠 Built graph with {total_nodes} nodes (from topology)")
-        print(f"⚠️  {len(disconnected)} nodes have no outgoing connections")
+        print(f"✅  graph built   nodes: {len(self.node_lookup):,}   "
+              f"edges: forward {fwd_edges:,}  lateral {lat_edges:,}")
+
+    # ---------- convenience -----------------------------------------------------
 
     def get_neighbors(self, node_id):
         return self.graph.get(node_id, [])
@@ -69,52 +114,28 @@ class CarlaGraph:
     def get_all_nodes(self):
         return list(self.graph.keys())
 
+    # optional visual helpers
     def visualize(self, color=(0, 255, 0), life_time=30.0):
-        for node_id in self.graph:
-            wp = self.get_waypoint(node_id)
-            if wp:
-                self.world.debug.draw_string(
-                    wp.transform.location,
-                    'O',
-                    draw_shadow=False,
-                    color=carla.Color(*color),
-                    life_time=life_time
-                )
+        for wp in self.node_lookup.values():
+            self.world.debug.draw_string(wp.transform.location,
+                                         'O',
+                                         draw_shadow=False,
+                                         color=carla.Color(*color),
+                                         life_time=life_time)
 
-    def get_closest_node(self, location):
-        min_dist = float('inf')
-        closest_node = None
+    def get_closest_node(self, location: carla.Location):
+        """
+        Return the ID of the waypoint‑node closest to the given CARLA Location.
+        """
+        closest_id   = None
+        min_distance = float("inf")
 
-        for node_id in self.graph:
-            wp = self.get_waypoint(node_id)
-            if wp is None:
-                continue
+        for node_id, wp in self.node_lookup.items():
             dist = location.distance(wp.transform.location)
-            if dist < min_dist:
-                min_dist = dist
-                closest_node = node_id
+            if dist < min_distance:
+                min_distance = dist
+                closest_id   = node_id
 
-        return closest_node
+        return closest_id
 
-    def print_graph_summary(self, limit=20):
-        print(f"\n📊 Graph Summary: {len(self.graph)} nodes")
-        print(f"{'Node':>20} -> Neighbors (count)")
 
-        count = 0
-        for node_id, neighbors in self.graph.items():
-            print(f"{str(node_id):>20} -> {len(neighbors)} neighbors")
-            count += 1
-            if count >= limit:
-                print("... (truncated)")
-                break
-
-    def print_edges(self, limit=20):
-        print("\n🔗 Graph Edges (from → to, distance):")
-        count = 0
-        for from_id, neighbors in self.graph.items():
-            for to_id, dist in neighbors:
-                print(f"{from_id} → {to_id}   (dist={dist:.2f})")
-                count += 1
-                if count >= limit:
-                    print("... (truncated)")
-                    return
