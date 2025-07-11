@@ -76,18 +76,21 @@ class TaxiAgent:
 
     # ----------------------------------------------------------------------
 
-    def drive_route(self, waypoints):
-        """
-        Blocks until vehicle reaches final waypoint. Returns elapsed seconds.
-        """
+    def drive_route(self, waypoints, do_sync_tick=False):
         if len(waypoints) < 2:
             return 0.0
 
         self.follower = PurePursuitFollower(self.vehicle, self.world, waypoints)
-
         t0 = self.world.get_snapshot().timestamp.elapsed_seconds
-        while self.world.wait_for_tick():
+
+        while True:
+            if do_sync_tick:
+                self.world.tick()                     # 💡 advance the simulation manually
+            else:
+                self.world.wait_for_tick()
+
             if not self.follower.tick():
-                break
+                break  # Route finished
+
         t1 = self.world.get_snapshot().timestamp.elapsed_seconds
         return round(t1 - t0, 2)

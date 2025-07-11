@@ -22,7 +22,7 @@ def _draw_debug(world, graph, visited, start_id, end_id,
         if wp:
             world.debug.draw_string(wp.transform.location,
                                     'R', draw_shadow=False,
-                                    color=blue, life_time=life_time)
+                                    color=blue, life_time=5.0)
 
     # start / end labels
     for nid, label, col in [(start_id, 'START', green),
@@ -31,7 +31,7 @@ def _draw_debug(world, graph, visited, start_id, end_id,
         if wp:
             world.debug.draw_string(wp.transform.location + carla.Location(z=0.5),
                                     label, draw_shadow=False,
-                                    color=col, life_time=life_time)
+                                    color=col, life_time=1.0)
 
     # final path line (if found)
     if reached and path and len(path) > 1:
@@ -42,7 +42,7 @@ def _draw_debug(world, graph, visited, start_id, end_id,
                                 wpb + carla.Location(z=0.3),
                                 thickness=0.05,
                                 color=cyan,
-                                life_time=life_time)
+                                life_time=15.0)
 
 
 class RouteGenerator:
@@ -74,7 +74,6 @@ class RouteGenerator:
             visited.add(current_id)
 
             if current_id == end_id:
-                print(f"✅  reached destination node {end_id}")
                 break
 
             for neighbor_id, weight in graph.get_neighbors(current_id):
